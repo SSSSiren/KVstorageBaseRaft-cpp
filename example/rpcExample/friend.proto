@@ -1,28 +1,82 @@
 syntax = "proto3";
 
+// package 会映射到生成后的 C++ 命名空间。
+// 例如该文件生成的类型会以 fixbug:: 开头：
+// fixbug::GetFriendsListRequest
+// fixbug::GetFriendsListResponse
+// fixbug::FiendServiceRpc_Stub
 package fixbug;  //所在的命名空间
 
+// 为 C++ 生成通用的 service / stub 代码。
+// 开启后 protobuf 会为 service 额外生成：
+// 1. 服务端基类 FiendServiceRpc
+// 2. 客户端代理类 FiendServiceRpc_Stub
+//
+// 在本项目里：
+// - 服务端继承生成的 Service 基类，重写真正业务逻辑
+// - 客户端通过生成的 Stub，把本地函数调用转成远程 RPC 请求
 option cc_generic_services = true;  //开启桩stub服务
 
+// 通用业务返回结构。
+// 这里表达的是“业务执行结果”，而不是 RPC 框架层是否调用成功。
+// 二者要区分：
+// 1. RPC 框架错误：连接失败、超时、反序列化失败、服务不存在
+// 2. 业务逻辑错误：参数非法、用户不存在、查询失败
 message ResultCode
 {
+    // 业务错误码。
+    // 通常约定 0 表示成功，非 0 表示失败。
     int32 errcode = 1;
+
+    // 业务错误信息。
+    // 使用 bytes 表示底层按原始字节序列保存。
+    // 当前示例里通常承载普通文本错误描述。
     bytes errmsg = 2;
 }
 
+// 获取好友列表请求。
+// 客户端会把这个消息序列化后发送给服务端。
 message GetFriendsListRequest  //请求，响应
 {
+    // 需要查询好友列表的用户 id。
     uint32 userid = 1;
 }
 
+// 获取好友列表响应。
+// 服务端处理完成后，把该消息返回给客户端。
 message GetFriendsListResponse  //请求，响应
 {
+    // 通用业务处理结果。
     ResultCode result = 1;
+
+    // repeated 表示该字段可以出现多次。
+    // 这里对应“好友名列表”。
+    // 生成后的 C++ 代码中可以通过 add_friends() 追加元素，
+    // 通过 friends_size() / friends(i) 读取结果。
     repeated bytes friends = 2;
 }
 
+// service 用来定义“远程可调用接口”。
+// 它本质上是一份 RPC 接口契约，描述：
+// 1. 服务名是什么
+// 2. 暴露了哪些方法
+// 3. 每个方法的请求类型和响应类型分别是什么
+//
+// 在本项目中：
+// - 客户端创建 FiendServiceRpc_Stub，并调用其 GetFriendsList(...)
+// - Stub 内部会把调用交给 MprpcChannel 做序列化和网络发送
+// - 服务端 RpcProvider 收到请求后，再根据 service_name / method_name
+//   分发到继承该基类的业务对象上执行
 // 好友模块
 service FiendServiceRpc  //具体的服务模块和服务方法
 {
+    // RPC 方法定义：
+    // 方法名     : GetFriendsList
+    // 请求类型   : GetFriendsListRequest
+    // 响应类型   : GetFriendsListResponse
+    //
+    // 这意味着调用方和服务方都必须遵守这套接口规范。
+    // 客户端看起来像是在本地调用函数，
+    // 但底层实际会被框架转成一次远程调用。
     rpc GetFriendsList(GetFriendsListRequest) returns(GetFriendsListResponse);
 }

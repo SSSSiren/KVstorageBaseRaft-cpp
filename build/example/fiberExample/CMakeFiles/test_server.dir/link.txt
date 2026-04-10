@@ -1,0 +1,1 @@
+/usr/bin/g++ -g CMakeFiles/test_server.dir/server.cpp.o -o /home/siaren/Raft/KVstorageBaseRaft-cpp/bin/test_server   -L/home/siaren/Raft/KVstorageBaseRaft-cpp/lib  -Wl,-rpath,/home/siaren/Raft/KVstorageBaseRaft-cpp/lib /home/siaren/Raft/KVstorageBaseRaft-cpp/lib/libfiber_lib.a -lpthread -ldl -ldl 

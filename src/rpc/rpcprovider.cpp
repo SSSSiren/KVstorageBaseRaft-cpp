@@ -13,56 +13,66 @@ service_name =>  service描述
                         method_name  =>  method方法对象
 json   protobuf
 */
-// 这里是框架提供给外部使用的，可以发布rpc方法的函数接口
-// 只是简单的把服务描述符和方法描述符全部保存在本地而已
-// todo 待修改 要把本机开启的ip和端口写在文件里面
+// 这里是 RPC 服务发布阶段的核心入口。
+// 用户把一个继承自 protobuf Service 的业务对象传进来，
+// 框架会提取：
+// 1. service 的名字
+// 2. service 下所有 method 的描述符
+// 并把这些元信息缓存起来。
+//
+// 后面网络请求到达时，框架就能根据
+// service_name + method_name
+// 在本地找到应当分发到哪个业务对象、哪个业务方法。
 void RpcProvider::NotifyService(google::protobuf::Service *service) {
   ServiceInfo service_info;
 
-  // 获取了服务对象的描述信息
+  // protobuf 在编译 .proto 时，会为服务生成完整的“反射信息”。
+  // 这里先取到 service 的描述符，它记录了服务名、方法数、每个方法的签名等。
   const google::protobuf::ServiceDescriptor *pserviceDesc = service->GetDescriptor();
-  // 获取服务的名字
+
+  // 服务名通常来自 .proto 中定义的 service 名字。
   std::string service_name = pserviceDesc->name();
-  // 获取服务对象service的方法的数量
+
+  // 该服务暴露出来的 RPC 方法数量。
   int methodCnt = pserviceDesc->method_count();
 
   std::cout << "service_name:" << service_name << std::endl;
 
   for (int i = 0; i < methodCnt; ++i) {
-    // 获取了服务对象指定下标的服务方法的描述（抽象描述） UserService   Login
+    // 方法描述符中不保存具体实现，只保存“这是哪个方法”的元信息。
+    // 真正执行时，会借助 protobuf 生成类中的 CallMethod 做动态分发。
     const google::protobuf::MethodDescriptor *pmethodDesc = pserviceDesc->method(i);
     std::string method_name = pmethodDesc->name();
     service_info.m_methodMap.insert({method_name, pmethodDesc});
   }
+
+  // 保存 service 实例本身，后续收到请求时最终要靠它来真正执行业务方法。
   service_info.m_service = service;
   m_serviceMap.insert({service_name, service_info});
 }
 
 // 启动rpc服务节点，开始提供rpc远程网络调用服务
 void RpcProvider::Run(int nodeIndex, short port) {
-  //获取可用ip
-  char *ipC;
-  char hname[128];
-  struct hostent *hent;
-  gethostname(hname, sizeof(hname));
-  hent = gethostbyname(hname);
-  for (int i = 0; hent->h_addr_list[i]; i++) {
-    ipC = inet_ntoa(*(struct in_addr *)(hent->h_addr_list[i]));  // IP地址
-  }
-  std::string ip = std::string(ipC);
-  //    // 获取端口
-  //    if(getReleasePort(port)) //在port的基础上获取一个可用的port，不知道为何没有效果
-  //    {
-  //        std::cout << "可用的端口号为：" << port << std::endl;
-  //    }
-  //    else
-  //    {
-  //        std::cout << "获取可用端口号失败！" << std::endl;
-  //    }
-  //写入文件 "test.conf"
+  // 获取可用 ip 的旧逻辑被注释掉了。
+  // 原因是通过主机名在 WSL/容器环境下常常拿到内网地址，
+  // 对调试并不友好，因此这里直接绑定 0.0.0.0，表示监听本机所有网卡。
+  // char *ipC;
+  // char hname[128];
+  // struct hostent *hent;
+  // gethostname(hname, sizeof(hname));
+  // hent = gethostbyname(hname);
+  // for (int i = 0; hent->h_addr_list[i]; i++) {
+  //   ipC = inet_ntoa(*(struct in_addr *)(hent->h_addr_list[i]));  // IP地址
+  // }
+  // std::string ip = std::string(ipC);
+  std::string ip = "0.0.0.0";
+
+  // 把当前节点监听信息写入配置文件。
+  // 这个做法比较原始，但能让其他模块知道当前节点的 ip / port。
+  // 在完整的分布式系统里，这类信息通常由配置中心、静态配置或注册中心维护。
   std::string node = "node" + std::to_string(nodeIndex);
   std::ofstream outfile;
-  outfile.open("test.conf", std::ios::app);  //打开文件并追加写入
+  outfile.open("test.conf", std::ios::app);
   if (!outfile.is_open()) {
     std::cout << "打开文件失败！" << std::endl;
     exit(EXIT_FAILURE);
@@ -71,13 +81,14 @@ void RpcProvider::Run(int nodeIndex, short port) {
   outfile << node + "port=" + std::to_string(port) << std::endl;
   outfile.close();
 
-  //创建服务器
+  // muduo::InetAddress 对监听地址做封装。
   muduo::net::InetAddress address(ip, port);
 
-  // 创建TcpServer对象
+  // 创建 TcpServer。
+  // RpcProvider 本质上是“在 muduo 网络框架之上的一层 RPC 分发器”。
   m_muduo_server = std::make_shared<muduo::net::TcpServer>(&m_eventLoop, address, "RpcProvider");
 
-  // 绑定连接回调和消息读写回调方法  分离了网络代码和业务代码
+  // 绑定连接回调和消息回调，网络读写与业务分发在这里完成解耦。
   /*
   bind的作用：
   如果不使用std::bind将回调函数和TcpConnection对象绑定起来，那么在回调函数中就无法直接访问和修改TcpConnection对象的状态。因为回调函数是作为一个独立的函数被调用的，它没有当前对象的上下文信息（即this指针），也就无法直接访问当前对象的状态。
@@ -87,13 +98,15 @@ void RpcProvider::Run(int nodeIndex, short port) {
   m_muduo_server->setMessageCallback(
       std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 
-  // 设置muduo库的线程数量
+  // muduo 的 IO 线程数。
+  // 线程池越大，服务端可同时处理的网络事件越多，但并不代表业务一定线性扩容。
   m_muduo_server->setThreadNum(4);
 
-  // rpc服务端准备启动，打印信息
+  // RPC 服务端启动前打印监听信息。
   std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
 
-  // 启动网络服务
+  // start() 负责启动底层监听 socket 和线程池；
+  // loop() 进入事件循环，线程随后会阻塞在事件分发上。
   m_muduo_server->start();
   m_eventLoop.loop();
   /*
@@ -109,9 +122,10 @@ void RpcProvider::Run(int nodeIndex, short port) {
 
 // 新的socket连接回调
 void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn) {
-  // 如果是新连接就什么都不干，即正常的接收连接即可
+  // 新连接建立时不需要主动处理，等对方发数据即可。
+  // 这里只在“连接已断开”的情况下做收尾。
   if (!conn->connected()) {
-    // 和rpc client的连接断开了
+    // 连接断开后关闭底层连接对象。
     conn->shutdown();
   }
 }
@@ -131,46 +145,54 @@ std::string   insert和copy方法
 // 这里来的肯定是一个远程调用请求
 // 因此本函数需要：解析请求，根据服务名，方法名，参数，来调用service的来callmethod来调用本地的业务
 void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net::Buffer *buffer, muduo::Timestamp) {
-  // 网络上接收的远程rpc调用请求的字符流    Login args
+  // 从网络缓冲区中一次性取出当前收到的字节流。
+  // 这个 recv_buf 就是调用方按自定义 RPC 协议拼好的完整请求报文。
   std::string recv_buf = buffer->retrieveAllAsString();
 
-  // 使用protobuf的CodedInputStream来解析数据流
+  // 使用 protobuf 提供的流式解码器解析变长整数和字符串，
+  // 避免手写字节偏移逻辑。
   google::protobuf::io::ArrayInputStream array_input(recv_buf.data(), recv_buf.size());
   google::protobuf::io::CodedInputStream coded_input(&array_input);
   uint32_t header_size{};
 
-  coded_input.ReadVarint32(&header_size);  // 解析header_size
+  // 先读出报文头长度。
+  // 该项目协议大体格式如下：
+  // varint(header_size) + rpc_header_str + args_str
+  coded_input.ReadVarint32(&header_size);
 
-  // 根据header_size读取数据头的原始字符流，反序列化数据，得到rpc请求的详细信息
+  // 读取 rpc_header_str，并将其反序列化为 RpcHeader。
+  // RpcHeader 里包含：
+  // 1. service_name
+  // 2. method_name
+  // 3. args_size
   std::string rpc_header_str;
   RPC::RpcHeader rpcHeader;
   std::string service_name;
   std::string method_name;
 
-  // 设置读取限制，不必担心数据读多
+  // 设置读取边界，确保只在 header_size 范围内读 header。
   google::protobuf::io::CodedInputStream::Limit msg_limit = coded_input.PushLimit(header_size);
   coded_input.ReadString(&rpc_header_str, header_size);
-  // 恢复之前的限制，以便安全地继续读取其他数据
+  // 恢复读取边界，后续还要继续读取 args。
   coded_input.PopLimit(msg_limit);
   uint32_t args_size{};
   if (rpcHeader.ParseFromString(rpc_header_str)) {
-    // 数据头反序列化成功
+    // 头部解析成功后，就知道“我要调用谁、传参长度是多少”了。
     service_name = rpcHeader.service_name();
     method_name = rpcHeader.method_name();
     args_size = rpcHeader.args_size();
   } else {
-    // 数据头反序列化失败
+    // 头部都解不出来，说明请求不合法，直接丢弃。
     std::cout << "rpc_header_str:" << rpc_header_str << " parse error!" << std::endl;
     return;
   }
 
-  // 获取rpc方法参数的字符流数据
+  // 继续按 args_size 读取业务参数区。
   std::string args_str;
-  // 直接读取args_size长度的字符串数据
   bool read_args_success = coded_input.ReadString(&args_str, args_size);
 
   if (!read_args_success) {
-    // 处理错误：参数数据读取失败
+    // 参数区长度不匹配，说明数据包异常。
     return;
   }
 
@@ -183,7 +205,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
   //    std::cout << "args_str: " << args_str << std::endl;
   //    std::cout << "============================================" << std::endl;
 
-  // 获取service对象和method对象
+  // 第一步，根据 service_name 找注册过的 service。
   auto it = m_serviceMap.find(service_name);
   if (it == m_serviceMap.end()) {
     std::cout << "服务：" << service_name << " is not exist!" << std::endl;
@@ -195,16 +217,20 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
     return;
   }
 
+  // 第二步，在对应 service 下查找 method_name。
   auto mit = it->second.m_methodMap.find(method_name);
   if (mit == it->second.m_methodMap.end()) {
     std::cout << service_name << ":" << method_name << " is not exist!" << std::endl;
     return;
   }
 
-  google::protobuf::Service *service = it->second.m_service;       // 获取service对象  new UserService
-  const google::protobuf::MethodDescriptor *method = mit->second;  // 获取method对象  Login
+  // service 是用户注册的业务对象，例如 UserService / FriendService。
+  // method 是 protobuf 描述的“抽象方法元信息”。
+  google::protobuf::Service *service = it->second.m_service;
+  const google::protobuf::MethodDescriptor *method = mit->second;
 
-  // 生成rpc方法调用的请求request和响应response参数,由于是rpc的请求，因此请求需要通过request来序列化
+  // 通过 protobuf 反射机制创建 request / response 对象。
+  // 这一步非常关键：框架并不知道具体方法类型，但能根据 method 动态构造参数对象。
   google::protobuf::Message *request = service->GetRequestPrototype(method).New();
   if (!request->ParseFromString(args_str)) {
     std::cout << "request parse error, content:" << args_str << std::endl;
@@ -212,14 +238,18 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
   }
   google::protobuf::Message *response = service->GetResponsePrototype(method).New();
 
-  // 给下面的method方法的调用，绑定一个Closure的回调函数
-  // closure是执行完本地方法之后会发生的回调，因此需要完成序列化和反向发送请求的操作
+  // 注册一个 Closure 回调。
+  // 业务方法执行完成后，会调用 done->Run()，
+  // done 内部绑定的正是 SendRpcResponse(conn, response)。
+  // 也就是说：业务层只负责填 response，不直接碰网络发送。
   google::protobuf::Closure *done =
       google::protobuf::NewCallback<RpcProvider, const muduo::net::TcpConnectionPtr &, google::protobuf::Message *>(
           this, &RpcProvider::SendRpcResponse, conn, response);
 
-  // 在框架上根据远端rpc请求，调用当前rpc节点上发布的方法
-  // new UserService().Login(controller, request, response, done)
+  // 到这里就实现了“从网络请求 -> 本地函数调用”的桥接。
+  // 实际调用形态等价于：
+  // service->某个业务方法(request, response, done)
+  // 只是这里通过 protobuf 的反射接口做成了统一动态分发。
 
   /*
   为什么下面这个service->CallMethod 要这么写？或者说为什么这么写就可以直接调用远程业务方法了
@@ -230,25 +260,29 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
   由于xx方法被 用户注册的service类 重写了，因此这个方法运行的时候会调用 用户注册的service类 的xx方法
   真的是妙呀
   */
-  //真正调用方法
+  // 真正调用方法。
+  // 第 2 个参数 controller 这里传 nullptr，说明当前框架没有把更多调用状态透传给业务层。
   service->CallMethod(method, nullptr, request, response, done);
 }
 
-// Closure的回调操作，用于序列化rpc的响应和网络发送,发送响应回去
+// Closure 回调：把 response 序列化后发回调用方。
 void RpcProvider::SendRpcResponse(const muduo::net::TcpConnectionPtr &conn, google::protobuf::Message *response) {
   std::string response_str;
-  if (response->SerializeToString(&response_str))  // response进行序列化
+  if (response->SerializeToString(&response_str))
   {
-    // 序列化成功后，通过网络把rpc方法执行的结果发送会rpc的调用方
+    // 服务端回包时只发送业务响应体，没有再额外封装头部。
+    // 客户端此时已经知道自己调用的是哪个方法，因此只需按预期 response 类型反序列化即可。
     conn->send(response_str);
   } else {
     std::cout << "serialize response_str error!" << std::endl;
   }
-  //    conn->shutdown(); // 模拟http的短链接服务，由rpcprovider主动断开连接  //改为长连接，不主动断开
+  // 这里不主动断开连接，说明当前 RPC 框架支持连接复用。
+  // 这对 Raft 场景很重要，因为节点间会高频通信，频繁建连代价较高。
 }
 
 RpcProvider::~RpcProvider() {
   std::cout << "[func - RpcProvider::~RpcProvider()]: ip和port信息：" << m_muduo_server->ipPort() << std::endl;
   m_eventLoop.quit();
-  //    m_muduo_server.   怎么没有stop函数，奇奇怪怪，看csdn上面的教程也没有要停止，甚至上面那个都没有
+  // muduo::TcpServer 没有像某些框架那样暴露显式 stop()，
+  // 当前析构逻辑主要是退出事件循环。
 }

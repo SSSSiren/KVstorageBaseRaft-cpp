@@ -6,6 +6,10 @@
 
 // todo:会涉及反复打开文件的操作，没有考虑如果文件出现问题会怎么办？？
 void Persister::Save(const std::string raftstate, const std::string snapshot) {
+  // 同时保存 Raft 状态和快照。
+  // 常见于：
+  // 1. 本地生成新快照时
+  // 2. 接收到 leader 下发的快照时
   std::lock_guard<std::mutex> lg(m_mtx);
   clearRaftStateAndSnapshot();
   // 将raftstate和snapshot写入本地文件
@@ -14,6 +18,7 @@ void Persister::Save(const std::string raftstate, const std::string snapshot) {
 }
 
 std::string Persister::ReadSnapshot() {
+  // 读取本地已保存的业务快照。
   std::lock_guard<std::mutex> lg(m_mtx);
   if (m_snapshotOutStream.is_open()) {
     m_snapshotOutStream.close();
@@ -33,6 +38,8 @@ std::string Persister::ReadSnapshot() {
 }
 
 void Persister::SaveRaftState(const std::string &data) {
+  // 只保存 Raft 状态，不改快照。
+  // 用于普通日志追加、term/votedFor 变化等场景。
   std::lock_guard<std::mutex> lg(m_mtx);
   // 将raftstate和snapshot写入本地文件
   clearRaftState();
@@ -47,6 +54,7 @@ long long Persister::RaftStateSize() {
 }
 
 std::string Persister::ReadRaftState() {
+  // 读取节点重启恢复所需的 Raft 协议状态。
   std::lock_guard<std::mutex> lg(m_mtx);
 
   std::fstream ifs(m_raftStateFileName, std::ios_base::in);
@@ -63,6 +71,9 @@ Persister::Persister(const int me)
     : m_raftStateFileName("raftstatePersist" + std::to_string(me) + ".txt"),
       m_snapshotFileName("snapshotPersist" + std::to_string(me) + ".txt"),
       m_raftStateSize(0) {
+  // 每个节点维护两份本地持久化文件：
+  // 1. raftstatePersistX.txt   保存 Raft 协议状态
+  // 2. snapshotPersistX.txt    保存业务快照
   /**
    * 检查文件状态并清空文件
    */
